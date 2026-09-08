@@ -1,0 +1,6 @@
+# Dependencias para Teleoperación Bimanual (Python)
+mediapipe>=0.10.9
+opencv-python>=4.8.0
+numpy>=1.24.0
+websockets>=12.0
+pyserial>=3.5

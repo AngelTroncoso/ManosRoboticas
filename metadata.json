@@ -1,0 +1,7 @@
+{
+  "name": "Bimanual Robot Teleoperation",
+  "description": "Real-time bimanual robotic hand teleoperation system using MediaPipe HandLandmarker, joint kinematics, ESP32/PCA9685 servo mapping, and AI supervision.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
