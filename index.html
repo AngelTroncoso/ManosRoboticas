@@ -12,6 +12,49 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      // Defensive fix: in certain iframe sandboxes/browsers, window.fetch has only a getter.
+      // Re-defining it with both getter and setter prevents "Uncaught TypeError: Cannot set property fetch of #<Window> which has only a getter".
+      (function () {
+        try {
+          var currentFetch = window.fetch;
+          var patchTarget = function (target) {
+            if (!target) return;
+            try {
+              var desc = Object.getOwnPropertyDescriptor(target, 'fetch');
+              if (!desc || (desc.get && !desc.set) || desc.writable === false) {
+                Object.defineProperty(target, 'fetch', {
+                  get: function () {
+                    return currentFetch;
+                  },
+                  set: function (fn) {
+                    currentFetch = fn;
+                  },
+                  configurable: true,
+                  enumerable: true,
+                });
+              }
+            } catch (_) {}
+          };
+
+          patchTarget(window);
+          if (window.Window && window.Window.prototype) {
+            patchTarget(window.Window.prototype);
+          }
+          if (typeof globalThis !== 'undefined') {
+            patchTarget(globalThis);
+          }
+
+          // Global error listener to prevent uncaught fetch getter errors from breaking the page
+          window.addEventListener('error', function (e) {
+            if (e && e.message && e.message.indexOf('Cannot set property fetch') !== -1) {
+              e.preventDefault();
+              return true;
+            }
+          });
+        } catch (_) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

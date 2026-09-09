@@ -8,7 +8,21 @@ import { CalibrationModal } from "./components/CalibrationModal";
 import { HardwareConfigModal, HARDWARE_PRESETS } from "./components/HardwareConfigModal";
 import { GeminiSupervisor } from "./components/GeminiSupervisor";
 import { CodeViewerModal } from "./components/CodeViewerModal";
-import { Move3d, Layers, Cpu, Sun, Moon } from "lucide-react";
+import { MacroRecorderModal } from "./components/MacroRecorderModal";
+import { WiFiConnectModal } from "./components/WiFiConnectModal";
+import {
+  Move3d,
+  Layers,
+  Cpu,
+  Sun,
+  Moon,
+  Film,
+  Wifi,
+  Lock,
+  Unlock,
+  Shield,
+  FileSpreadsheet,
+} from "lucide-react";
 import {
   HandKinematics,
   ServoState,
@@ -18,6 +32,7 @@ import {
 } from "./types/teleop";
 import {
   HandFilterBankTS,
+  SlewRateBank,
   DEFAULT_CALIBRATION,
   normalizeServoAngles,
 } from "./utils/kinematicsEngine";
@@ -76,15 +91,63 @@ export function App() {
   const serialWriterRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
+  // ESP32 Direct WiFi WebSocket
+  const [isWiFiModalOpen, setIsWiFiModalOpen] = useState(false);
+  const [isConnectedEspWiFi, setIsConnectedEspWiFi] = useState(false);
+  const [espWsUrl, setEspWsUrl] = useState("ws://192.168.4.1:81");
+  const espWsRef = useRef<WebSocket | null>(null);
+
+  // Advanced Teleoperation Controls
+  const [isMacroModalOpen, setIsMacroModalOpen] = useState(false);
+  const [playbackLeft, setPlaybackLeft] = useState<ServoState | null>(null);
+  const [playbackRight, setPlaybackRight] = useState<ServoState | null>(null);
+  const [slewRateEnabled, setSlewRateEnabled] = useState(true);
+  const [pinchLockActive, setPinchLockActive] = useState(false);
+
   // Slew & Filter banks
   const filterBanks = useRef<{ left: HandFilterBankTS; right: HandFilterBankTS }>({
     left: new HandFilterBankTS(),
     right: new HandFilterBankTS(),
   });
 
+  const slewBanks = useRef<{ left: SlewRateBank; right: SlewRateBank }>({
+    left: new SlewRateBank(2.8),
+    right: new SlewRateBank(2.8),
+  });
+
   const seqCounterRef = useRef<number>(0);
   const lastTxTimeRef = useRef<number>(0);
   const lastSeenRef = useRef<{ left: number; right: number }>({ left: 0, right: 0 });
+
+  // Connect to ESP32 WiFi WebSocket
+  const handleConnectEspWiFi = (url: string) => {
+    try {
+      setEspWsUrl(url);
+      if (espWsRef.current) espWsRef.current.close();
+      const ws = new WebSocket(url);
+      ws.onopen = () => {
+        setIsConnectedEspWiFi(true);
+      };
+      ws.onclose = () => {
+        setIsConnectedEspWiFi(false);
+      };
+      ws.onerror = () => {
+        setIsConnectedEspWiFi(false);
+      };
+      espWsRef.current = ws;
+    } catch (e) {
+      console.warn("Failed to connect to ESP32 WiFi WebSocket:", e);
+      setIsConnectedEspWiFi(false);
+    }
+  };
+
+  const handleDisconnectEspWiFi = () => {
+    if (espWsRef.current) {
+      espWsRef.current.close();
+      espWsRef.current = null;
+    }
+    setIsConnectedEspWiFi(false);
+  };
 
   // Connect WebSocket to local server hub
   useEffect(() => {
@@ -180,11 +243,21 @@ export function App() {
       let currentRightServos = rightServos;
       const ts = now / 1000;
 
-      if (left) {
+      if (playbackLeft) {
+        currentLeftServos = playbackLeft;
+        setLeftServos(playbackLeft);
+      } else if (left) {
         lastSeenRef.current.left = now;
         const rawNorm = normalizeServoAngles(left, calibration);
+
+        // Pinch Lock gesture hold
+        if (pinchLockActive) {
+          rawNorm.thumb = 0.95;
+          rawNorm.index = 0.95;
+        }
+
         // Apply 1-Euro adaptive filter: smooth stillness + zero-latency tracking
-        const norm: ServoState = {
+        let norm: ServoState = {
           thumb: filterBanks.current.left.filter("thumb", rawNorm.thumb, ts),
           index: filterBanks.current.left.filter("index", rawNorm.index, ts),
           middle: filterBanks.current.left.filter("middle", rawNorm.middle, ts),
@@ -192,6 +265,18 @@ export function App() {
           pinky: filterBanks.current.left.filter("pinky", rawNorm.pinky, ts),
           wrist: filterBanks.current.left.filter("wrist", rawNorm.wrist, ts),
         };
+
+        // Apply Slew Rate Limiter (servomechanism protection)
+        if (slewRateEnabled) {
+          norm = {
+            thumb: slewBanks.current.left.limit("thumb", norm.thumb, ts),
+            index: slewBanks.current.left.limit("index", norm.index, ts),
+            middle: slewBanks.current.left.limit("middle", norm.middle, ts),
+            ring: slewBanks.current.left.limit("ring", norm.ring, ts),
+            pinky: slewBanks.current.left.limit("pinky", norm.pinky, ts),
+            wrist: slewBanks.current.left.limit("wrist", norm.wrist, ts),
+          };
+        }
 
         // Apply hardware inversions if set
         const finalLeft: ServoState = {
@@ -206,10 +291,20 @@ export function App() {
         setLeftServos(finalLeft);
       }
 
-      if (right) {
+      if (playbackRight) {
+        currentRightServos = playbackRight;
+        setRightServos(playbackRight);
+      } else if (right) {
         lastSeenRef.current.right = now;
         const rawNorm = normalizeServoAngles(right, calibration);
-        const norm: ServoState = {
+
+        // Pinch Lock gesture hold
+        if (pinchLockActive) {
+          rawNorm.thumb = 0.95;
+          rawNorm.index = 0.95;
+        }
+
+        let norm: ServoState = {
           thumb: filterBanks.current.right.filter("thumb", rawNorm.thumb, ts),
           index: filterBanks.current.right.filter("index", rawNorm.index, ts),
           middle: filterBanks.current.right.filter("middle", rawNorm.middle, ts),
@@ -217,6 +312,18 @@ export function App() {
           pinky: filterBanks.current.right.filter("pinky", rawNorm.pinky, ts),
           wrist: filterBanks.current.right.filter("wrist", rawNorm.wrist, ts),
         };
+
+        // Apply Slew Rate Limiter (servomechanism protection)
+        if (slewRateEnabled) {
+          norm = {
+            thumb: slewBanks.current.right.limit("thumb", norm.thumb, ts),
+            index: slewBanks.current.right.limit("index", norm.index, ts),
+            middle: slewBanks.current.right.limit("middle", norm.middle, ts),
+            ring: slewBanks.current.right.limit("ring", norm.ring, ts),
+            pinky: slewBanks.current.right.limit("pinky", norm.pinky, ts),
+            wrist: slewBanks.current.right.limit("wrist", norm.wrist, ts),
+          };
+        }
 
         const finalRight: ServoState = {
           thumb: hardwareProfile.servosRight.thumb.inverted ? 1 - norm.thumb : norm.thumb,
@@ -257,9 +364,14 @@ export function App() {
 
           setPacketsSent((c) => c + 1);
 
-          // Send via WebSocket if open
+          // Send via WebSocket hub if open
           if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify(packet));
+          }
+
+          // Send via Direct ESP32 WiFi WebSocket if open
+          if (espWsRef.current && espWsRef.current.readyState === WebSocket.OPEN) {
+            espWsRef.current.send(JSON.stringify(packet));
           }
 
           // Send via USB Serial if connected
@@ -268,11 +380,11 @@ export function App() {
           }
         };
 
-        if (left) transmitHand("left", left, currentLeftServos);
-        if (right) transmitHand("right", right, currentRightServos);
+        if (left || playbackLeft) transmitHand("left", left, currentLeftServos);
+        if (right || playbackRight) transmitHand("right", right, currentRightServos);
       }
     },
-    [txRateHz, calibration, hardwareProfile]
+    [txRateHz, calibration, hardwareProfile, playbackLeft, playbackRight, pinchLockActive, slewRateEnabled]
   );
 
   return (
@@ -308,6 +420,78 @@ export function App() {
 
               {/* Right Column: Robotic Digital Twins & 3D Stage (7 cols) */}
               <div className="lg:col-span-7 space-y-4">
+                {/* Advanced Teleoperation Toolbar */}
+                <div className="flex flex-wrap items-center justify-between bg-zinc-900/60 border border-zinc-800/80 px-3 py-2 rounded-xl gap-2 text-xs font-mono shadow-sm">
+                  <div className="flex items-center gap-2">
+                    {/* Macro Recording Button */}
+                    <button
+                      id="btn-open-macro-recorder"
+                      onClick={() => setIsMacroModalOpen(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-500/40 font-medium transition"
+                      title="Grabar, reproducir y exportar rutinas bimanuales a Arduino C++ PROGMEM o CSV"
+                    >
+                      <Film className="w-3.5 h-3.5 text-purple-400" />
+                      <span>Grabar Macro</span>
+                    </button>
+
+                    {/* WiFi ESP32 Modal Trigger */}
+                    <button
+                      id="btn-open-wifi-modal"
+                      onClick={() => setIsWiFiModalOpen(true)}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border font-medium transition ${
+                        isConnectedEspWiFi
+                          ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                          : "bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border-zinc-700"
+                      }`}
+                      title="Configuración de conexión WebSocket directa por WiFi a la ESP32"
+                    >
+                      <Wifi className={`w-3.5 h-3.5 ${isConnectedEspWiFi ? "text-emerald-400" : "text-zinc-400"}`} />
+                      <span>{isConnectedEspWiFi ? "WiFi ESP32: Conectado" : "WiFi ESP32"}</span>
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {/* Pinch Lock (Agarre Fijo) Toggle */}
+                    <button
+                      id="btn-toggle-pinch-lock"
+                      onClick={() => setPinchLockActive(!pinchLockActive)}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border font-medium transition ${
+                        pinchLockActive
+                          ? "bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-sm font-semibold"
+                          : "bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200"
+                      }`}
+                      title="Mantiene bloqueada la pinza para sostener objetos sin fatiga en la mano humana"
+                    >
+                      {pinchLockActive ? (
+                        <>
+                          <Lock className="w-3.5 h-3.5 text-amber-400" />
+                          <span>Pinza: Bloqueada</span>
+                        </>
+                      ) : (
+                        <>
+                          <Unlock className="w-3.5 h-3.5 text-zinc-400" />
+                          <span>Pinza: Libre</span>
+                        </>
+                      )}
+                    </button>
+
+                    {/* Slew Rate Protection Toggle */}
+                    <button
+                      id="btn-toggle-slew-protection"
+                      onClick={() => setSlewRateEnabled(!slewRateEnabled)}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border font-medium transition ${
+                        slewRateEnabled
+                          ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                          : "bg-zinc-950 text-zinc-500 border-zinc-800"
+                      }`}
+                      title="Protección de aceleración mecánica (S-Curve) para evitar tirones en los engranajes"
+                    >
+                      <Shield className={`w-3.5 h-3.5 ${slewRateEnabled ? "text-emerald-400" : "text-zinc-500"}`} />
+                      <span>S-Curve: {slewRateEnabled ? "ON" : "OFF"}</span>
+                    </button>
+                  </div>
+                </div>
+
                 {/* Visualizer Mode Switcher */}
                 <div className="flex flex-wrap items-center justify-between bg-zinc-900/80 border border-zinc-800 px-3 py-2 rounded-xl gap-2 shadow-sm">
                   <div className="flex items-center gap-2">
@@ -407,6 +591,7 @@ export function App() {
                       servos={leftServos}
                       detected={!!leftKinematics}
                       pinchAperture={leftKinematics?.pinchAperture}
+                      abductions={leftKinematics?.abductions}
                       theme={stageTheme}
                       channels={{
                         thumb: hardwareProfile.servosLeft.thumb.channel,
@@ -424,6 +609,7 @@ export function App() {
                       servos={rightServos}
                       detected={!!rightKinematics}
                       pinchAperture={rightKinematics?.pinchAperture}
+                      abductions={rightKinematics?.abductions}
                       theme={stageTheme}
                       channels={{
                         thumb: hardwareProfile.servosRight.thumb.channel,
@@ -479,6 +665,36 @@ export function App() {
 
         {activeTab === "code" && <CodeViewerModal />}
       </main>
+
+      {/* Macro Trajectory Recording & Replay Modal */}
+      {isMacroModalOpen && (
+        <MacroRecorderModal
+          isOpen={isMacroModalOpen}
+          onClose={() => setIsMacroModalOpen(false)}
+          currentLeftServos={leftServos}
+          currentRightServos={rightServos}
+          onPlaybackFrame={(frame) => {
+            setPlaybackLeft(frame.left);
+            setPlaybackRight(frame.right);
+          }}
+          onPlaybackComplete={() => {
+            setPlaybackLeft(null);
+            setPlaybackRight(null);
+          }}
+        />
+      )}
+
+      {/* ESP32 WiFi WebSocket Modal */}
+      {isWiFiModalOpen && (
+        <WiFiConnectModal
+          isOpen={isWiFiModalOpen}
+          onClose={() => setIsWiFiModalOpen(false)}
+          isConnected={isConnectedEspWiFi}
+          currentWsUrl={espWsUrl}
+          onConnect={handleConnectEspWiFi}
+          onDisconnect={handleDisconnectEspWiFi}
+        />
+      )}
 
       {/* Footer */}
       <footer className="border-t border-zinc-900 bg-zinc-950 py-4 px-4 text-center text-xs font-mono text-zinc-500">

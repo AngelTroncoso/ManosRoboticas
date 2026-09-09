@@ -1,7 +1,7 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { UserCalibrationProfile, HandKinematics } from "../types/teleop";
 import { DEFAULT_CALIBRATION } from "../utils/kinematicsEngine";
-import { Sliders, CheckCircle2, RotateCcw, Save, Hand, Sparkles } from "lucide-react";
+import { Sliders, CheckCircle2, RotateCcw, Save, Hand, Zap, Sparkles } from "lucide-react";
 
 interface CalibrationModalProps {
   currentKinematicsLeft: HandKinematics | null;
@@ -20,8 +20,93 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [saveMessage, setSaveMessage] = useState(false);
 
+  // Auto Calibration Wizard State
+  const [autoWizardActive, setAutoWizardActive] = useState(false);
+  const [autoPhase, setAutoPhase] = useState<"idle" | "prepare_open" | "open" | "prepare_fist" | "fist" | "done">("idle");
+  const [countdown, setCountdown] = useState<number>(3);
+
   // Active kinematics for calibration (prefers right hand if detected, else left)
   const activeKin = currentKinematicsRight || currentKinematicsLeft;
+  const activeKinRef = useRef(activeKin);
+  useEffect(() => {
+    activeKinRef.current = activeKin;
+  }, [activeKin]);
+
+  // Automated 3-Step Guided Wizard Runner
+  useEffect(() => {
+    if (!autoWizardActive) return;
+
+    let timer: NodeJS.Timeout;
+    if (autoPhase === "prepare_open") {
+      setCountdown(3);
+      timer = setInterval(() => {
+        setCountdown((c) => {
+          if (c <= 1) {
+            clearInterval(timer);
+            // Capture Open Pose
+            const kin = activeKinRef.current;
+            if (kin) {
+              setCalState((prev) => {
+                const next = { ...prev };
+                (["thumb", "index", "middle", "ring", "pinky"] as const).forEach((f) => {
+                  next[f] = { ...next[f], minAngle: Math.round(Math.max(0, kin.flexions[f].total)) };
+                });
+                return next;
+              });
+            }
+            setAutoPhase("prepare_fist");
+            return 0;
+          }
+          return c - 1;
+        });
+      }, 1000);
+    } else if (autoPhase === "prepare_fist") {
+      setCountdown(3);
+      timer = setInterval(() => {
+        setCountdown((c) => {
+          if (c <= 1) {
+            clearInterval(timer);
+            // Capture Fist Pose
+            const kin = activeKinRef.current;
+            if (kin) {
+              setCalState((prev) => {
+                const next = { ...prev };
+                (["thumb", "index", "middle", "ring", "pinky"] as const).forEach((f) => {
+                  const minVal = next[f].minAngle;
+                  next[f] = {
+                    ...next[f],
+                    maxAngle: Math.round(Math.max(minVal + 35, kin.flexions[f].total)),
+                  };
+                });
+                return next;
+              });
+            }
+            setAutoPhase("done");
+            return 0;
+          }
+          return c - 1;
+        });
+      }, 1000);
+    } else if (autoPhase === "done") {
+      onSaveCalibration(calState);
+      setSaveMessage(true);
+      const doneTimeout = setTimeout(() => {
+        setAutoWizardActive(false);
+        setAutoPhase("idle");
+        setStep(3);
+        setSaveMessage(false);
+      }, 2000);
+      return () => clearTimeout(doneTimeout);
+    }
+
+    return () => clearInterval(timer);
+  }, [autoWizardActive, autoPhase]);
+
+  const startAutoWizard = () => {
+    setAutoWizardActive(true);
+    setAutoPhase("prepare_open");
+    setCountdown(3);
+  };
 
   // Step 1: Capture Open Hand (0% baseline)
   const captureOpenPose = () => {
@@ -100,6 +185,15 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
 
           <div className="flex items-center gap-2">
             <button
+              onClick={startAutoWizard}
+              disabled={autoWizardActive || !activeKin}
+              className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-md bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 text-zinc-950 font-bold font-mono shadow transition"
+              title="Calibra mano abierta y puño cerrado con cuenta regresiva guiada"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              Auto-Calibrar (6s)
+            </button>
+            <button
               onClick={handleReset}
               className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-mono transition"
             >
@@ -115,6 +209,35 @@ export const CalibrationModal: React.FC<CalibrationModalProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Live Auto-Wizard Countdown Card */}
+        {autoWizardActive && (
+          <div className="p-4 rounded-xl bg-gradient-to-r from-cyan-950/60 to-emerald-950/60 border border-cyan-500/50 flex items-center justify-between animate-pulse">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-cyan-500/20 border border-cyan-400 flex items-center justify-center font-mono font-bold text-lg text-cyan-300">
+                {countdown}
+              </div>
+              <div>
+                <h4 className="text-sm font-bold font-mono text-cyan-200">
+                  {autoPhase === "prepare_open" && "PASO 1/2: MANTÉN LA MANO COMPLETAMENTE ABIERTA"}
+                  {autoPhase === "prepare_fist" && "PASO 2/2: CIERRA EL PUÑO FIRMEMENTE AHORA"}
+                  {autoPhase === "done" && "¡CALIBRACIÓN COMPLETADA CON ÉXITO!"}
+                </h4>
+                <p className="text-xs text-zinc-300">
+                  {autoPhase === "prepare_open" && "Extiende todos los dedos frente a la lente..."}
+                  {autoPhase === "prepare_fist" && "Aprieta todos los dedos contra la palma..."}
+                  {autoPhase === "done" && "Perfil ajustado y normalizado para tu mano."}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setAutoWizardActive(false)}
+              className="text-xs font-mono text-zinc-400 hover:text-zinc-200 px-2 py-1 rounded bg-zinc-900 border border-zinc-700"
+            >
+              Cancelar
+            </button>
+          </div>
+        )}
 
         {/* Step Guide Tabs */}
         <div className="grid grid-cols-3 gap-3">

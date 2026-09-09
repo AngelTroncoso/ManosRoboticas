@@ -292,6 +292,79 @@ export class HandFilterBankTS {
   }
 }
 
+// S-Curve Slew Rate Limiter to protect mechanical servos from violent step-changes
+export class SlewRateLimiter {
+  private maxRate: number; // Maximum change in normalized value (0.0 - 1.0) per second
+  private currentVal: number | null = null;
+  private lastTime: number | null = null;
+
+  constructor(maxRatePerSec = 2.5) {
+    this.maxRate = maxRatePerSec;
+  }
+
+  setRate(maxRatePerSec: number) {
+    this.maxRate = maxRatePerSec;
+  }
+
+  limit(target: number, ts?: number): number {
+    const now = ts ?? Date.now() / 1000;
+    if (this.currentVal === null || this.lastTime === null) {
+      this.currentVal = target;
+      this.lastTime = now;
+      return target;
+    }
+
+    const dt = Math.max(0.001, Math.min(0.2, now - this.lastTime));
+    this.lastTime = now;
+
+    if (this.maxRate <= 0) {
+      this.currentVal = target;
+      return target;
+    }
+
+    const maxDelta = this.maxRate * dt;
+    const delta = target - this.currentVal;
+
+    if (Math.abs(delta) <= maxDelta) {
+      this.currentVal = target;
+    } else {
+      this.currentVal += Math.sign(delta) * maxDelta;
+    }
+
+    return this.currentVal;
+  }
+
+  reset() {
+    this.currentVal = null;
+    this.lastTime = null;
+  }
+}
+
+export class SlewRateBank {
+  private limiters: Record<string, SlewRateLimiter> = {};
+  private maxRate: number;
+
+  constructor(maxRate = 2.5) {
+    this.maxRate = maxRate;
+  }
+
+  setRate(maxRate: number) {
+    this.maxRate = maxRate;
+    Object.values(this.limiters).forEach((lim) => lim.setRate(maxRate));
+  }
+
+  limit(key: string, value: number, ts?: number): number {
+    if (!this.limiters[key]) {
+      this.limiters[key] = new SlewRateLimiter(this.maxRate);
+    }
+    return this.limiters[key].limit(value, ts);
+  }
+
+  reset() {
+    Object.values(this.limiters).forEach((lim) => lim.reset());
+  }
+}
+
 export const DEFAULT_CALIBRATION: UserCalibrationProfile = {
   thumb: { minAngle: 12, maxAngle: 145 },
   index: { minAngle: 10, maxAngle: 155 },

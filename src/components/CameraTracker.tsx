@@ -9,7 +9,7 @@ import {
   generateSyntheticHand,
   FINGER_MAP,
 } from "../utils/kinematicsEngine";
-import { Camera, CameraOff, RefreshCw, Eye, EyeOff, PlayCircle } from "lucide-react";
+import { Camera, CameraOff, RefreshCw, Eye, EyeOff, PlayCircle, ExternalLink, AlertCircle } from "lucide-react";
 
 interface CameraTrackerProps {
   onKinematicsUpdate: (
@@ -20,6 +20,7 @@ interface CameraTrackerProps {
   mirrorMode: boolean;
   setMirrorMode: (m: boolean) => void;
   onFpsUpdate: (fps: number) => void;
+  deadReckoningFrames?: number;
 }
 
 const CONNECTIONS: [number, number][] = [
@@ -36,6 +37,7 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
   mirrorMode,
   setMirrorMode,
   onFpsUpdate,
+  deadReckoningFrames = 15,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -49,10 +51,45 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
   const [simPose, setSimPose] = useState<"open" | "fist" | "pinch" | "point" | "peace" | "bump" | "clap">("open");
   const [showOverlays, setShowOverlays] = useState(true);
 
+  // Available camera devices
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
+
+  // Dead Reckoning for momentary occlusion resistance
+  const deadReckoningRef = useRef<{
+    left: HandKinematics | null;
+    right: HandKinematics | null;
+    leftLossCount: number;
+    rightLossCount: number;
+  }>({
+    left: null,
+    right: null,
+    leftLossCount: 0,
+    rightLossCount: 0,
+  });
+
   const reqIdRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(performance.now());
   const frameCountRef = useRef<number>(0);
   const fpsTimerRef = useRef<number>(performance.now());
+
+  // Enumerate video devices
+  useEffect(() => {
+    async function getDevices() {
+      try {
+        if (!navigator.mediaDevices?.enumerateDevices) return;
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = devs.filter((d) => d.kind === "videoinput");
+        setVideoDevices(videoInputs);
+        if (videoInputs.length > 0 && !selectedDeviceId) {
+          setSelectedDeviceId(videoInputs[0].deviceId);
+        }
+      } catch (err) {
+        console.warn("Could not enumerate camera devices:", err);
+      }
+    }
+    getDevices();
+  }, []);
 
   // Initialize MediaPipe Tasks Vision HandLandmarker
   useEffect(() => {
@@ -108,29 +145,129 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
     };
   }, []);
 
-  // Start Camera
-  const startCamera = async () => {
+  // Start Camera with resilient fallback strategy
+  const startCamera = async (overrideDeviceId?: unknown) => {
     setCameraError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          facingMode: "user",
-        },
-      });
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error(
+          "Tu navegador no permite acceso a navigator.mediaDevices.getUserMedia (se requiere conexión HTTPS o localhost)."
+        );
+      }
+
+      // Safeguard: do not let MouseEvent or synthetic objects be used as deviceId
+      const devId =
+        typeof overrideDeviceId === "string" && overrideDeviceId.trim().length > 0
+          ? overrideDeviceId.trim()
+          : typeof selectedDeviceId === "string" && selectedDeviceId.trim().length > 0
+          ? selectedDeviceId.trim()
+          : undefined;
+
+      let stream: MediaStream | null = null;
+      let lastErr: any = null;
+
+      // Tier 1: Try with selected deviceId if valid string
+      if (devId) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              deviceId: { exact: devId },
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+            },
+          });
+        } catch (e) {
+          console.warn("Tier 1 (exact deviceId) failed, trying fallback...", e);
+          lastErr = e;
+        }
+      }
+
+      // Tier 2: Try standard user-facing 640x480
+      if (!stream) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+              facingMode: "user",
+            },
+          });
+        } catch (e) {
+          console.warn("Tier 2 (facingMode: user) failed, trying fallback...", e);
+          lastErr = e;
+        }
+      }
+
+      // Tier 3: Try resolution only without facingMode (many USB webcams reject facingMode)
+      if (!stream) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+            },
+          });
+        } catch (e) {
+          console.warn("Tier 3 (no facingMode) failed, trying basic video...", e);
+          lastErr = e;
+        }
+      }
+
+      // Tier 4: Minimal constraint fallback (most permissive possible)
+      if (!stream) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        } catch (e) {
+          lastErr = e;
+          throw lastErr;
+        }
+      }
+
+      if (!stream) {
+        throw lastErr || new Error("No se pudo iniciar el flujo de video.");
+      }
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        try {
+          await videoRef.current.play();
+        } catch (playErr) {
+          console.warn("Video play error (handled):", playErr);
+        }
         setIsCameraActive(true);
         setSimulationMode(false);
+        setCameraError(null);
+
+        // Once permission is granted, enumerate actual devices with their real labels
+        try {
+          const devs = await navigator.mediaDevices.enumerateDevices();
+          const videoInputs = devs.filter((d) => d.kind === "videoinput");
+          setVideoDevices(videoInputs);
+          const activeTrack = stream.getVideoTracks()[0];
+          const trackSettings = activeTrack?.getSettings();
+          if (trackSettings?.deviceId) {
+            setSelectedDeviceId(trackSettings.deviceId);
+          }
+        } catch (_) {}
       }
     } catch (err: any) {
-      console.warn("Camera error:", err);
-      setCameraError(
-        "No se pudo acceder a la cámara Web (permiso denegado o dispositivo ocupado). Activando generador de cinemática interactivo."
-      );
+      console.error("Camera acquisition failed:", err);
+      let msg = "No se pudo acceder a la cámara web.";
+      if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
+        msg =
+          "Permiso de cámara denegado. Revisa los permisos de cámara en el candado de la barra de direcciones o abre la aplicación en una pestaña nueva.";
+      } else if (err?.name === "NotFoundError" || err?.name === "DevicesNotFoundError") {
+        msg = "No se detectó ninguna cámara web conectada al dispositivo.";
+      } else if (err?.name === "NotReadableError" || err?.name === "TrackStartError") {
+        msg =
+          "La cámara está en uso por otra aplicación (Zoom, Google Meet, Teams, OBS). Cierra la otra app y reintenta.";
+      } else if (err?.name === "OverconstrainedError") {
+        msg = "La resolución o configuración requerida no es soportada por la cámara. Usando valores predeterminados.";
+      } else if (err?.message) {
+        msg = `Error al acceder a la cámara: ${err.message}`;
+      }
+
+      setCameraError(msg);
       setSimulationMode(true);
     }
   };
@@ -330,7 +467,7 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
 
           onKinematicsUpdate(leftKin, rightKin);
         }
-      } else if (videoRef.current && canvas && ctx && landmarkerRef.current) {
+      } else if (videoRef.current && canvas && ctx && isCameraActive) {
         const video = videoRef.current;
         if (video.readyState >= 2) {
           canvas.width = video.videoWidth || 640;
@@ -344,10 +481,11 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
           ctx.restore();
 
-          try {
-            const results = landmarkerRef.current.detectForVideo(video, now);
-            let leftKin: HandKinematics | null = null;
-            let rightKin: HandKinematics | null = null;
+          if (landmarkerRef.current) {
+            try {
+              const results = landmarkerRef.current.detectForVideo(video, now);
+              let leftKin: HandKinematics | null = null;
+              let rightKin: HandKinematics | null = null;
 
             if (results && results.landmarks && results.landmarks.length > 0) {
               // Convert raw landmarks to mirrored/normalized screen coordinates
@@ -466,12 +604,53 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
               }
             }
 
+            // Dead Reckoning (Inertial hold against occlusions)
+            if (!leftKin && deadReckoningRef.current.left && deadReckoningRef.current.leftLossCount < deadReckoningFrames) {
+              leftKin = deadReckoningRef.current.left;
+              deadReckoningRef.current.leftLossCount++;
+            } else if (leftKin) {
+              deadReckoningRef.current.left = leftKin;
+              deadReckoningRef.current.leftLossCount = 0;
+            } else {
+              deadReckoningRef.current.left = null;
+            }
+
+            if (!rightKin && deadReckoningRef.current.right && deadReckoningRef.current.rightLossCount < deadReckoningFrames) {
+              rightKin = deadReckoningRef.current.right;
+              deadReckoningRef.current.rightLossCount++;
+            } else if (rightKin) {
+              deadReckoningRef.current.right = rightKin;
+              deadReckoningRef.current.rightLossCount = 0;
+            } else {
+              deadReckoningRef.current.right = null;
+            }
+
+            // If dead reckoning is actively holding, draw indicator on HUD
+            if ((deadReckoningRef.current.leftLossCount > 0 && deadReckoningRef.current.leftLossCount < deadReckoningFrames) ||
+                (deadReckoningRef.current.rightLossCount > 0 && deadReckoningRef.current.rightLossCount < deadReckoningFrames)) {
+              ctx.save();
+              ctx.fillStyle = "rgba(234, 179, 8, 0.9)";
+              ctx.font = "bold 9px monospace";
+              ctx.fillText("HOLD INERCIAL (ANTI-OCLUSIÓN)", 12, canvas.height - 12);
+              ctx.restore();
+            }
+
             onKinematicsUpdate(leftKin, rightKin);
           } catch (err) {
             // Frame skip
           }
+        } else {
+          // Live video active while neural model finishes initializing
+          ctx.save();
+          ctx.fillStyle = "rgba(0, 0, 0, 0.65)";
+          ctx.fillRect(12, 12, 280, 24);
+          ctx.fillStyle = "#38bdf8";
+          ctx.font = "bold 11px monospace";
+          ctx.fillText("CÁMARA VIVA • Cargando MediaPipe Hand...", 20, 28);
+          ctx.restore();
         }
       }
+    }
 
       reqIdRef.current = requestAnimationFrame(loop);
     };
@@ -498,12 +677,16 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
     <div className="relative rounded-xl overflow-hidden border border-zinc-800 bg-zinc-950 flex flex-col">
       {/* Video container */}
       <div className="relative aspect-[4/3] bg-zinc-950 flex items-center justify-center overflow-hidden">
-        {/* Hidden video element for MediaPipe stream */}
+        {/* Active background video stream (must avoid display: none to guarantee WebGL/MediaPipe frame updates) */}
         <video
           ref={videoRef}
           playsInline
+          autoPlay
           muted
-          className="hidden"
+          className="absolute opacity-0 pointer-events-none -z-50 w-px h-px"
+          onLoadedMetadata={() => {
+            videoRef.current?.play().catch(() => {});
+          }}
         />
 
         {/* Live Canvas with Landmarks & Kinematics overlay */}
@@ -532,7 +715,7 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
           {!isCameraActive ? (
             <button
               id="btn-start-camera"
-              onClick={startCamera}
+              onClick={() => startCamera()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold shadow transition"
             >
               <Camera className="w-4 h-4" />
@@ -549,6 +732,28 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
             </button>
           )}
 
+          {/* Webcam Selector if multiple devices exist */}
+          {videoDevices.length > 1 && (
+            <select
+              value={selectedDeviceId}
+              onChange={(e) => {
+                const newId = e.target.value;
+                setSelectedDeviceId(newId);
+                if (isCameraActive) {
+                  stopCamera();
+                  setTimeout(() => startCamera(newId), 200);
+                }
+              }}
+              className="px-2 py-1.5 rounded-md text-xs font-mono bg-zinc-950 border border-zinc-700 text-zinc-300 max-w-[140px] truncate focus:outline-none"
+            >
+              {videoDevices.map((d, i) => (
+                <option key={d.deviceId || i} value={d.deviceId}>
+                  {d.label || `Cámara ${i + 1}`}
+                </option>
+              ))}
+            </select>
+          )}
+
           {/* Mirror mode toggle */}
           <button
             id="btn-toggle-mirror"
@@ -556,11 +761,11 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
             className={`px-2.5 py-1.5 rounded-md text-xs font-mono border transition ${
               mirrorMode
                 ? "bg-zinc-800 border-zinc-600 text-zinc-200"
-                : "bg-zinc-900 border-zinc-800 text-zinc-500"
+                : "bg-cyan-950/40 border-cyan-500/40 text-cyan-300"
             }`}
-            title="Efecto espejo para facilitar coordinación viso-motora"
+            title="Conmutar entre Vista Espejo y Vista Subjetiva (POV)"
           >
-            Espejo: {mirrorMode ? "ON" : "OFF"}
+            {mirrorMode ? "Vista: Espejo" : "Vista: POV"}
           </button>
 
           {/* Overlay visibility */}
@@ -609,19 +814,44 @@ export const CameraTracker: React.FC<CameraTrackerProps> = ({
         </div>
       </div>
 
-      {/* Error banner if any */}
+      {/* Error banner if any with direct recovery actions */}
       {(cameraError || modelError) && (
-        <div className="px-3 py-2 bg-amber-500/10 border-t border-amber-500/20 text-amber-300 text-xs flex items-center justify-between">
-          <span>{cameraError || modelError}</span>
-          <button
-            onClick={() => {
-              setCameraError(null);
-              setModelError(null);
-            }}
-            className="text-amber-200 underline ml-2"
-          >
-            Entendido
-          </button>
+        <div className="p-3 bg-amber-950/40 border-t border-amber-500/30 text-amber-200 text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5">
+          <div className="flex items-start gap-2 max-w-xl">
+            <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">{cameraError || modelError}</span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+            {cameraError && (
+              <>
+                <button
+                  id="btn-retry-camera"
+                  onClick={() => startCamera()}
+                  className="px-2.5 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 font-mono font-medium transition"
+                >
+                  Reintentar
+                </button>
+                <button
+                  id="btn-open-new-tab"
+                  onClick={() => window.open(window.location.href, "_blank")}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 font-mono font-medium transition"
+                  title="Abre la aplicación en una pestaña independiente para evitar restricciones de iframe en navegadores estrictos"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>Abrir en pestaña</span>
+                </button>
+              </>
+            )}
+            <button
+              onClick={() => {
+                setCameraError(null);
+                setModelError(null);
+              }}
+              className="text-zinc-400 hover:text-zinc-200 px-1 py-0.5 text-xs font-mono underline"
+            >
+              Cerrar
+            </button>
+          </div>
         </div>
       )}
     </div>

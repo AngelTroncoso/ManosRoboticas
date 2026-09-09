@@ -1,11 +1,12 @@
 import React, { useState } from "react";
-import { ServoState } from "../types/teleop";
+import { ServoState, FingerAbductions } from "../types/teleop";
 
 interface RoboticHandTwinProps {
   side: "left" | "right";
   servos: ServoState;
   detected: boolean;
   pinchAperture?: number;
+  abductions?: FingerAbductions;
   channels: Record<keyof ServoState, number>;
   theme?: "light" | "dark";
 }
@@ -15,6 +16,7 @@ export const RoboticHandTwin: React.FC<RoboticHandTwinProps> = ({
   servos,
   detected,
   pinchAperture = 1.0,
+  abductions,
   channels,
   theme = "light",
 }) => {
@@ -98,6 +100,14 @@ export const RoboticHandTwin: React.FC<RoboticHandTwinProps> = ({
 
   const isPinching = pinchAperture < 0.25;
 
+  // Estimated PCA9685 + Servo Bank Current (mA)
+  const currentMa = Math.round(
+    95 +
+      (servos.thumb + servos.index + servos.middle + servos.ring + servos.pinky) * 110 +
+      Math.abs(servos.wrist - 0.5) * 70
+  );
+  const isHighLoad = currentMa > 560;
+
   return (
     <div
       className={`flex flex-col rounded-xl border overflow-hidden shadow-lg transition-colors duration-200 ${
@@ -126,6 +136,20 @@ export const RoboticHandTwin: React.FC<RoboticHandTwinProps> = ({
           </h3>
         </div>
         <div className="flex items-center gap-2">
+          {/* Virtual Current Load Meter */}
+          <span
+            className={`text-[10px] font-mono px-1.5 py-0.5 rounded border flex items-center gap-1 ${
+              isHighLoad
+                ? "bg-amber-500/20 text-amber-300 border-amber-500/40 animate-pulse font-bold"
+                : isLight
+                ? "bg-slate-200 text-slate-700 border-slate-300"
+                : "bg-zinc-800/80 text-zinc-400 border-zinc-700"
+            }`}
+            title="Consumo eléctrico estimado del banco de servos PCA9685"
+          >
+            ⚡ {currentMa} mA
+          </span>
+
           {/* View mode toggle */}
           <button
             onClick={() => setViewMode((m) => (m === "2.5d" ? "3d" : "2.5d"))}
@@ -627,6 +651,21 @@ export const RoboticHandTwin: React.FC<RoboticHandTwinProps> = ({
             />
           </div>
         </div>
+
+        {/* Finger Abductions (Lateral Spread Angles) */}
+        {abductions && (
+          <div
+            className={`pt-2 border-t flex items-center justify-between text-[10px] font-mono ${
+              isLight ? "border-slate-200 text-slate-600" : "border-zinc-800/80 text-zinc-400"
+            }`}
+          >
+            <span className="font-semibold text-[9px] uppercase tracking-wider">Abducción:</span>
+            <span>T-I: {Math.round(abductions.thumbIndex)}°</span>
+            <span>I-M: {Math.round(abductions.indexMiddle)}°</span>
+            <span>M-R: {Math.round(abductions.middleRing)}°</span>
+            <span>R-P: {Math.round(abductions.ringPinky)}°</span>
+          </div>
+        )}
       </div>
     </div>
   );

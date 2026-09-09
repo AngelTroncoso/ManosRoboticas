@@ -11,6 +11,13 @@ export interface FingerAngles {
   total: number;
 }
 
+export interface FingerAbductions {
+  thumbIndex: number;
+  indexMiddle: number;
+  middleRing: number;
+  ringPinky: number;
+}
+
 export interface HandKinematics {
   side: "left" | "right";
   flexions: {
@@ -21,12 +28,7 @@ export interface HandKinematics {
     pinky: FingerAngles;
   };
   pinchAperture: number; // 0.0 (closed) to 1.0 (open)
-  abductions: {
-    thumbIndex: number;
-    indexMiddle: number;
-    middleRing: number;
-    ringPinky: number;
-  };
+  abductions: FingerAbductions;
   palmOrientation: {
     roll: number;
     pitch: number;
@@ -105,4 +107,21 @@ export interface GeminiAnalysisResult {
   overallAssessment: string;
   recommendedAction: string;
   safetyWarning: string | null;
+}
+
+export interface AdvancedControlSettings {
+  slewRateEnabled: boolean;
+  slewMaxSpeedDegPerSec: number; // e.g. 360 deg/sec
+  virtualTorqueLimit: number; // 0.6 to 1.0 (limits maximum closing torque)
+  pinchLockActive: boolean; // grip hold lock
+  deadReckoningFrames: number; // frames to hold position during occlusions (e.g. 15 frames)
+  perspectiveMode: "mirror" | "pov"; // Mirror vs First-Person POV
+}
+
+export interface MacroKeyframe {
+  timestamp: number;
+  left: ServoState;
+  right: ServoState;
+  leftPinch: number;
+  rightPinch: number;
 }
